@@ -84,7 +84,7 @@ class Trainer(object):
         self.epochs     = epochs
         self.checkpoint = checkpoint
 
-        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.01, momentum=0.1)
+        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.005, momentum=0.1)
         self.loss_function = loss_function if loss_function else nn.NLLLoss()
         self.accuracy_function = accuracy_function if accuracy_function else self._default_accuracy_function
         self.train_loss = LossCollector()
@@ -112,7 +112,7 @@ class Trainer(object):
                 
             for j in tqdm(range(self.feeder.train.num_batch)):
                 self.optimizer.zero_grad()
-                i, t = self.feeder.train.next_batch()
+                _, i, t = self.feeder.train.next_batch()
                 output = self.runner.run(i)
                 loss = self.loss_function( output, t )
                 self.train_loss.append(loss)
@@ -125,7 +125,7 @@ class Trainer(object):
                     log.info('-- {} -- loss: {}'.format(epoch, self.train_loss))
                     return
                 
-                del i, t
+                del _, i, t
                 
             log.info('-- {} -- loss: {}'.format(epoch, self.train_loss))            
             if self.do_every_checkpoint(epoch) == FLAGS.STOP_TRAINING:
@@ -138,14 +138,14 @@ class Trainer(object):
 
         self.test_loss.empty()
         for j in tqdm(range(self.feeder.test.num_batch)):
-            i, t = self.feeder.train.next_batch()
+            _, i, t = self.feeder.train.next_batch()
             outputs =  self.runner.run(i)
             loss = self.loss_function(outputs, t)
             self.test_loss.append(loss)
 
                     
         log.info('-- {} -- loss: {}, accuracy: {}'.format(epoch, self.test_loss, self.accuracy_function(outputs, t)))
-        del i, t
+        del _, i, t
 
         if early_stopping:
             return self.loss_trend()
@@ -192,8 +192,10 @@ class Predictor(object):
         self.feed = feed
         
     def predict(self,  batch_index=0):
-        i = self.feed.nth_batch(batch_index)
+        _, i, *__ = self.feed.nth_batch(batch_index)
         output = self.runner.run(i)
-        output = self.repr_function(output, batch_index)
-        results = ListTable().extend(output)
+        results = ListTable()
+        results.extend( self.repr_function(output, self.feed, batch_index) )
+        output = output.data
+        del _, i, __
         return output, results
