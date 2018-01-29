@@ -8,7 +8,7 @@ from debug import memory_consumed
 
 class DataFeed(object):
 
-    def __init__(self,  datapoints, batchop, batch_size=1, vocab=None):
+    def __init__(self,  datapoints, batchop, batch_size=1, vocab=None, sort_key=lambda x: len(x[1])):
         self._offset     = 0
         self._size       = len(datapoints)
         self._batch_size = batch_size
@@ -16,16 +16,23 @@ class DataFeed(object):
         self.vocab = vocab
         self._batch_cache = {}
         if len(datapoints):
-            self.bind(datapoints)
+            self.bind(sorted(datapoints, key=sort_key))
 
     def bind(self, datapoints):
         self._size = len(datapoints)
         self._data = datapoints
+        self._data_dict = {}
+        for d in datapoints:
+            self._data_dict[d.id] = d
         self.reset_offset()
 
     @property
     def data(self):
         return self._data
+
+    @property
+    def data_dict(self):
+        return self._data_dict
     
     @property
     def size(self):
