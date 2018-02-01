@@ -8,14 +8,19 @@ class Base(metaclass=ConfigMeta):
     pass
 
 class Config(Base):
-    input_vocab_size = 2000
-    hidden_dim = 200
+    split_ratio = 0.85
+    input_vocab_size = 50000
+    hidden_dim = 300
+    embed_dim = 300
     bidirectional = True
     output_vocab_size = 5
     num_recurrent_layers = 10
     batch_size = 2
     cuda = True
     tqdm = True
+    find_lengths = False
+    seq_len_limit = 500
+    flush = False
     class Embed(Base):
         class _default(Base):
             size = 200
@@ -33,6 +38,7 @@ class Config(Base):
             level=logging.INFO
         class DATAFEED(Base):
             level=logging.DEBUG
+
 #Tests
 assert Config.Embed.Char.size == 200
 assert Config.Embed.Word.size == 300
