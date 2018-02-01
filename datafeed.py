@@ -4,11 +4,12 @@ from logger import datafeed_logger
 log = datafeed_logger.getLogger('main')
 log.setLevel(Config.Log.DATAFEED.level)
 
+from utilz import tqdm
 from debug import memory_consumed
 
 class DataFeed(object):
 
-    def __init__(self,  datapoints, batchop, batch_size=1, vocab=None, sort_key=lambda x: len(x[1])):
+    def __init__(self,  datapoints, batchop, batch_size=1, vocab=None, sort_key=None):
         self._offset     = 0
         self._size       = len(datapoints)
         self._batch_size = batch_size
@@ -16,15 +17,30 @@ class DataFeed(object):
         self.vocab = vocab
         self._batch_cache = {}
         if len(datapoints):
-            self.bind(sorted(datapoints, key=sort_key))
+            if sort_key:
+                datapoints = sorted(datapoints, key=sort_key)
+            self.bind(datapoints)
+
+        log.info('built Datafeed with the following props:')
+        log.info(' size       : {}'.format(self.size))
+        log.info(' batch_size : {}'.format(self.batch_size))
+        log.info(' num_batch  : {}'.format(self.num_batch))
+        
 
     def bind(self, datapoints):
         self._size = len(datapoints)
         self._data = datapoints
         self._data_dict = {}
+
+        if self.size > self.batch_size * self.num_batch:
+            log.info('batch bleeds')
+            self._size += self.batch_size
+            
+        self.reset_offset()
+
         for d in datapoints:
             self._data_dict[d.id] = d
-        self.reset_offset()
+
 
     @property
     def data(self):
@@ -50,28 +66,28 @@ class DataFeed(object):
     def offset(self):
         return self._offset
     
-    def batch(self):
+    def batch(self, apply_batchop=True):
         self._offset += self.batch_size
-        return self._batchop(
-            self.data[ self.offset - self.batch_size   :   self.offset ],
-            self.vocab
-        )
-        
-    def next_batch(self):
+        b = self.data[ self.offset - self.batch_size   :   self.offset ]
+        if apply_batchop:
+            return self._batchop(b, self.vocab)
+        return b
+    
+    def next_batch(self, apply_batchop=True):
         try:
             if self.offset + self.batch_size > self.size:
                 self.reset_offset()
-            return self.batch()
+            return self.batch(apply_batchop=apply_batchop)
         except:
             log.exception('batch failed')
-            return self.next_batch()
+            return self.next_batch(apply_batchop=apply_batchop)
 
-    def nth_batch(self, n):
-        return self._batchop(
-            self.data[ n * self.batch_size   :   (n+1) * self.batch_size ],
-            self.vocab
-        )
+    def nth_batch(self, n, apply_batchop=True):
+        b =    self.data[ n * self.batch_size   :   (n+1) * self.batch_size ]
+        if apply_batchop:
+            return self._batchop(b, self.vocab)
         
+        return b        
 
     def reset_offset(self):
         self._offset = 0
