@@ -72,3 +72,7 @@ class ListTable(list):
         log.debug('number of lines: {}'.format(len(lines)))
         return '\n'.join(lines + ['\n'])
             
+def lcm(x, y):
+   lcm = x if x > y else y 
+   while not (lcm % x == 0 and lcm % y == 0):  lcm += 1
+   return lcm
