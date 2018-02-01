@@ -1,8 +1,20 @@
+from config import Config
+from pprint import pprint, pformat
+from logger import utilz_logger
+log = utilz_logger.getLogger('main')
+import logging
+log.setLevel(logging.DEBUG)
+
 """
     Local Utilities, Helper Functions
 
 """
 from pprint import pprint, pformat
+from tqdm import tqdm as _tqdm
+from config import Config
+
+def tqdm(a):
+    return _tqdm(a) if Config().tqdm else a
 
 
 def squeeze(lol):
@@ -52,3 +64,11 @@ class ListTable(list):
             html.append("</tr>")
         html.append("</table>")
         return ''.join(html)
+
+    def __repr__(self):
+        lines = []
+        for i in self:
+            lines.append('|'.join(i))
+        log.debug('number of lines: {}'.format(len(lines)))
+        return '\n'.join(lines + ['\n'])
+            
