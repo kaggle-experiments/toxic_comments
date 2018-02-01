@@ -1,3 +1,4 @@
+
 from config import Config
 from pprint import pprint, pformat
 from logger import trainer_logger
@@ -33,22 +34,22 @@ class Runner(object):
     def model(self):
         return self._model
     
-class LossCollector(list):
+class Averager(list):
     def __init__(self, *args, **kwargs):
-        super(LossCollector, self).__init__(*args, **kwargs)
+        super(Averager, self).__init__(*args, **kwargs)
 
-    def backward(self):
-        if len(self) > 0:
-            return self[-1].backward()
-
+    @property
+    def avg(self):
+        return sum(self)/len(self)
+        
     def __str__(self):
         if len(self) > 0:
-            return '{}'.format(self[-1])
+            return 'min/max/avg/latest: {:0.5f}/{:0.5f}/{:0.5f}/{:0.5f}'.format(min(self), max(self), self.avg, self[-1])
         
         return '<empty>'
 
     def append(self, a):
-        super(LossCollector, self).append(a.data[0])
+        super(Averager, self).append(a.data[0])
 
     def empty(self):
         del self[:]
@@ -84,11 +85,12 @@ class Trainer(object):
         self.epochs     = epochs
         self.checkpoint = checkpoint
 
-        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.005, momentum=0.1)
+        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.01, momentum=0.1)
         self.loss_function = loss_function if loss_function else nn.NLLLoss()
         self.accuracy_function = accuracy_function if accuracy_function else self._default_accuracy_function
-        self.train_loss = LossCollector()
-        self.test_loss  = LossCollector()
+        self.train_loss = Averager()
+        self.test_loss  = Averager()
+        self.accuracy   = Averager()
         
         self.model_snapshots = []
         
@@ -108,7 +110,6 @@ class Trainer(object):
         self.runner.model.train()
         for epoch in range(self.epochs):
             log.critical('memory consumed : {}'.format(memory_consumed()))            
-         
                 
             for j in tqdm(range(self.feeder.train.num_batch)):
                 self.optimizer.zero_grad()
@@ -118,14 +119,14 @@ class Trainer(object):
                 self.train_loss.append(loss)
 
                 loss.backward()
-                #print( [i.weight for i in self.runner.model.classify] )
                 self.optimizer.step()
                 
                 if test_drive and j >= test_drive:
                     log.info('-- {} -- loss: {}'.format(epoch, self.train_loss))
                     return
-                
+
                 del _, i, t
+                del output, loss
                 
             log.info('-- {} -- loss: {}'.format(epoch, self.train_loss))            
             if self.do_every_checkpoint(epoch) == FLAGS.STOP_TRAINING:
@@ -135,18 +136,22 @@ class Trainer(object):
     def do_every_checkpoint(self, epoch, early_stopping=True):
         if epoch % self.checkpoint != 0:
             return
-
+        self.runner.model.eval()
         self.test_loss.empty()
+        self.accuracy.empty()
         for j in tqdm(range(self.feeder.test.num_batch)):
             _, i, t = self.feeder.train.next_batch()
-            outputs =  self.runner.run(i)
-            loss = self.loss_function(outputs, t)
+            output =  self.runner.run(i)
+
+            loss = self.loss_function(output, t)
             self.test_loss.append(loss)
+            accuracy = self.accuracy_function(output, t)
+            self.accuracy.append(accuracy)
 
-                    
-        log.info('-- {} -- loss: {}, accuracy: {}'.format(epoch, self.test_loss, self.accuracy_function(outputs, t)))
-        del _, i, t
-
+            del output, loss, accuracy
+            del _, i, t
+            
+        log.info('-- {} -- loss: {}, accuracy: {}'.format(epoch, self.test_loss, self.accuracy))
         if early_stopping:
             return self.loss_trend()
 
@@ -193,9 +198,11 @@ class Predictor(object):
         
     def predict(self,  batch_index=0):
         _, i, *__ = self.feed.nth_batch(batch_index)
+        self.runner.model.eval()
         output = self.runner.run(i)
         results = ListTable()
         results.extend( self.repr_function(output, self.feed, batch_index) )
-        output = output.data
+        output_ = output.data
+        del output
         del _, i, __
-        return output, results
+        return output_, results
