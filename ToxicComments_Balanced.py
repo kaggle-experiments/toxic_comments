@@ -8,6 +8,7 @@ log.setLevel(logging.INFO)
 import pickle
 
 import random
+from functools import partial
 from nltk.tokenize import WordPunctTokenizer
 word_punct_tokenizer = WordPunctTokenizer()
 word_tokenize = word_punct_tokenizer.tokenize
@@ -56,27 +57,19 @@ if Config().flush:
     train_datapoints = [p for p in tqdm(train_datapoints) if seq_len_criteria(p)]
     print('train: {}, test: {}'.format(len(train_datapoints), len(test_datapoints)))
 
-    classified_datapoints = ClassifiedDatapoints([], [], [], [], [], [], [])
+    classified_datapoints = defaultdict(list)
     for datapoint in train_datapoints:
-        if sum(datapoint[2:]) == 0:
-            classified_datapoints.neutral.append(datapoint)
-            continue
-        if datapoint.toxic         == True: classified_datapoints.toxic.append(datapoint)
-        if datapoint.severe_toxic  == True: classified_datapoints.severe_toxic.append(datapoint)
-        if datapoint.obscene       == True: classified_datapoints.obscene.append(datapoint)
-        if datapoint.threat        == True: classified_datapoints.threat.append(datapoint)
-        if datapoint.insult        == True: classified_datapoints.insult.append(datapoint)
-        if datapoint.identity_hate == True: classified_datapoints.identity_hate.append(datapoint)
+        classified_datapoints[tuple(datapoint[2:])].append(datapoint)
             
     sort_key = lambda p: len(word_tokenize(p.comment_text))
 
-    sorted_classified_datapoints = []
-    for i in range(len(classified_datapoints)):
+    sorted_classified_datapoints = {}
+    for i in classified_datapoints.keys():
         split_index = int( len(classified_datapoints[i]) * Config().split_ratio )
-        sorted_classified_datapoints.append((sorted(classified_datapoints [i] [:split_index], key=sort_key),
-                                    sorted(classified_datapoints [i] [split_index:], key=sort_key)))
+        sorted_classified_datapoints[i] = (sorted(classified_datapoints [i] [:split_index], key=sort_key),
+                                           sorted(classified_datapoints [i] [split_index:], key=sort_key))
 
-    classified_datapoints = ClassifiedDatapoints._make(sorted_classified_datapoints)
+    classified_datapoints = sorted_classified_datapoints
     test_datapoints = sorted(test_datapoints, key=lambda p: -len(word_tokenize(p.comment_text)))
     
     # ## Build vocabulary
@@ -201,7 +194,8 @@ class BiLSTMDecoderModel(nn.Module):
         self.decode = nn.GRUCell(self.hidden_dim, 2*self.hidden_dim)
         
         self.dropout = nn.Dropout(0.2)
-        self.classify = nn.Linear(2*self.hidden_dim, 2)
+        self.project = nn.Linear(2*self.hidden_dim, Config.project_dim)
+        self.classify = nn.Linear(Config.project_dim, 2)
 
         self.log = model_logger.getLogger('model')
         self.size_log = self.log.getLogger('size')
@@ -229,13 +223,16 @@ class BiLSTMDecoderModel(nn.Module):
     def forward(self, seq, classes=OUTPUT_IDS):
         seq = Variable(torch.LongTensor(seq))
         classes = Variable(torch.LongTensor(classes))
-           
+        dropout = self.dropout
+        if self.training:
+            dropout = lambda i: i
+        
         if Config().cuda: 
             seq = seq.cuda()
             classes = classes.cuda()
             
         batch_size, seq_size = seq.size()
-        seq_emb = self.__(   self.dropout( F.tanh(self.embed(seq)).transpose(1,0) ), 'seq_emb'   )
+        seq_emb = self.__(   dropout( F.tanh(self.embed(seq)).transpose(1,0) ), 'seq_emb'   )
 
         foutputs, boutputs = [], []
         foutput = self.init_hidden(batch_size), self.init_hidden(batch_size)
@@ -243,8 +240,8 @@ class BiLSTMDecoderModel(nn.Module):
         for i in range(seq_size):
             foutput = self.__(  self.fencode(seq_emb[ i], foutput), 'foutput'   )
             boutput = self.__(  self.bencode(seq_emb[-i], boutput), 'boutput'   )
-            foutput = self.dropout(foutput[0]), self.dropout(foutput[1])
-            boutput = self.dropout(boutput[0]), self.dropout(boutput[1])
+            foutput = dropout(foutput[0]), dropout(foutput[1])
+            boutput = dropout(boutput[0]), dropout(boutput[1])
             foutputs.append(foutput[0])
             boutputs.append(boutput[0])
 
@@ -258,8 +255,8 @@ class BiLSTMDecoderModel(nn.Module):
             class_emb = self.__( self.embed_class(class_), 'class_emb' )
             class_emb = self.__( F.tanh(class_emb).expand(batch_size, *class_emb.size()), 'class_emb' )
 
-            output = self.__(  F.tanh( self.dropout(self.decode(class_emb, output)) ), 'output'  )
-            logits = self.__(  self.classify(output), 'logits'  )
+            output = self.__(  F.tanh( dropout(self.decode(class_emb, output)) ), 'output'  )
+            logits = self.__(  self.classify(self.project(output)), 'logits'  )
             outputs.append(F.log_softmax(logits, dim=-1))
             
         ret = self.__(  torch.stack(outputs), 'ret'  )
@@ -267,7 +264,7 @@ class BiLSTMDecoderModel(nn.Module):
 
     
 # ## Loss and accuracy function
-def loss(output, target, loss_function=nn.NLLLoss(), *args, **kwargs):
+def loss(output, target, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
     loss = 0
     target = target[0]
     target = Variable(torch.LongTensor(target), requires_grad=False)
@@ -277,7 +274,7 @@ def loss(output, target, loss_function=nn.NLLLoss(), *args, **kwargs):
     batch_size = output.size()[0]
     for i, t in zip(output, target):
 
-        loss += loss_function(i, t.squeeze()).mean()
+        loss += scale * loss_function(i, t.squeeze()).mean()
         log.debug('loss size: {}'.format(loss.size()))
 
     del target
@@ -346,31 +343,42 @@ def test_repr_function(output, feed, batch_index):
     del indices, seq
     return results
 
-def  experiment(eons=1000, epochs=1, checkpoint=10):
+def  experiment(eons=1000, epochs=1, checkpoint=1):
     try:
         model =  BiLSTMDecoderModel(Config(), len(INPUT_VOCAB), len(CHAR_VOCAB), len(OUTPUT_VOCAB))
         if Config().cuda:  model = model.cuda()
 
-        labels = OUTPUT_VOCAB + ['neutral']
         train_feed, test_feed, predictor_feed = {}, {}, {}
         trainer, predictor = {}, {}
-        for label, label_id in zip(labels, range(len(labels))):
-            train_feed[label]      = DataFeed(classified_datapoints[label_id][0], batchop=batchop, batch_size=32)
-            test_feed[label]       = DataFeed(classified_datapoints[label_id][1], batchop=batchop, batch_size=32)
-            predictor_feed[label]  = DataFeed(classified_datapoints[label_id][1], batchop=batchop, batch_size=12)
+
+        dev_test_feed = [p for points in classified_datapoints.values() for p in points[1]]
+        max_size = max( sorted(   [len(i[0]) for i in classified_datapoints.values()]   )[:-1] )
+        #max_size = max( sorted(   [len(i[0]) for i in classified_datapoints.values()]   ) )
+        
+        print('dev_test_feed - len',len(dev_test_feed))
+        for label in classified_datapoints.keys():
+            if len(classified_datapoints[label][0]) < 1: continue
+            print('label: {} and size: {}'.format(label, len(classified_datapoints[label][0])))
+            train_feed[label]      = DataFeed(classified_datapoints[label][0], batchop=batchop, batch_size=max(32, int(len(classified_datapoints[label][0])/600))   )
+            #test_feed[label]       = DataFeed(classified_datapoints[label][1], batchop=batchop, batch_size=32)
+            test_feed[label]       = DataFeed(dev_test_feed, batchop=batchop, batch_size=256)
+            predictor_feed[label]  = DataFeed(classified_datapoints[label][1], batchop=batchop, batch_size=12)
             
+            turns = int(max_size/train_feed[label].size) + 1            
             trainer[label] = Trainer(model=model, 
-                                     loss_function=loss, accuracy_function=accuracy, 
+                                     loss_function=partial(loss, scale=turns), accuracy_function=accuracy, 
                                      checkpoint=checkpoint, epochs=epochs,
                                      feeder = Feeder(train_feed[label], test_feed[label]))
 
             predictor[label] = Predictor(model=model, feed=predictor_feed[label], repr_function=repr_function)
-            
+
         test_predictor_feed = DataFeed(test_datapoints, batchop=test_batchop, batch_size=128)
         test_predictor = Predictor(model=model, feed=test_predictor_feed, repr_function=test_repr_function)
 
-        max_size = max([len(i[0]) for i in classified_datapoints[:-1]])
-        
+
+        label_trainer_triples = sorted( [(l, t, train_feed[l].size) for l, t in trainer.items()], key=lambda x: x[2] )
+        log.info('trainers built {}'.format(pformat(label_trainer_triples)))
+
         dump = open('results/experiment_attn.csv', 'w').close()
         for e in range(eons):
             dump = open('results/experiment_attn.csv', 'a')
@@ -378,8 +386,10 @@ def  experiment(eons=1000, epochs=1, checkpoint=10):
             dump.close()
             log.info('on {}th eon'.format(e))
 
-            for label in labels[:-1]:
-                log.info('training for {} datapoints========================================'.format(label))
+            for label, _, _ in reversed(label_trainer_triples):
+                if not sum(label): continue
+                label_desc = '-'.join([OUTPUT_VOCAB[l] for l in [i for i, x in enumerate(label) if x == 1]] )
+                log.info('=================================== training for {} datapoints ========================================'.format(label_desc))
 
                 with open('results/experiment_attn.csv', 'a') as dump:
                     output, results = predictor[label].predict(random.choice(range(predictor_feed[label].num_batch)))
@@ -387,9 +397,9 @@ def  experiment(eons=1000, epochs=1, checkpoint=10):
                     del output, results
                 
                 turns = int(max_size/train_feed[label].size) + 1
-                log.info('  size: {} and turns: {}'.format(train_feed[label].size, turns))                
+                log.info('========================  size: {} and turns: {}==========================================='.format(train_feed[label].size, turns))                
                 for turn in range(turns):
-                    log.info('  label: {} and turn: {}/{}'.format(label, turn, turns))                
+                    log.info('==================================  label: {} and turn: {}/{}====================================='.format(label_desc, turn, turns))                
                     trainer[label].train()
 
             if not e % 10:
