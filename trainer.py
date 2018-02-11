@@ -35,9 +35,13 @@ class Runner(object):
         return self._model
     
 class Averager(list):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, filename=None, *args, **kwargs):
         super(Averager, self).__init__(*args, **kwargs)
+        if filename:
+            open(filename, 'w').close()
 
+        self.filename = filename
+        
     @property
     def avg(self):
         return sum(self)/len(self)
@@ -53,6 +57,11 @@ class Averager(list):
 
     def empty(self):
         del self[:]
+
+    def write_to_file(self):
+        if self.filename:
+            with open(self.filename, 'a') as f:
+                f.write(self.__str__() + '\n')
     
 class Snapshot(object):
     def __init__(self, filepath='snapshot.pth'):
@@ -71,13 +80,14 @@ class Snapshot(object):
 
         
 class Trainer(object):
-    def __init__(self, runner=None, model=None,
+    def __init__(self, name, runner=None, model=None,
                  feeder = None,
                  optimizer=None,
                  loss_function = None,
                  accuracy_function=None,
                  f1score_function=None,
                  epochs=10000, checkpoint=1,
+                 directory='results',
                  *args, **kwargs):
         
         self.__build_model_group(runner, model, *args, **kwargs)
@@ -86,21 +96,23 @@ class Trainer(object):
         self.epochs     = epochs
         self.checkpoint = checkpoint
 
-        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.05, momentum=0.1)
+        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.005, momentum=0.1)
 
         # necessary metrics
-        self.train_loss = Averager()
-        self.test_loss  = Averager()
+        self.train_loss = Averager(filename = '{}/{}.{}.{}'.format(directory, name, 'metrics',  'train_loss'))
+        self.test_loss  = Averager(filename = '{}/{}.{}.{}'.format(directory, name, 'metrics', 'test_loss'))
         self.accuracy_function = accuracy_function if accuracy_function else self._default_accuracy_function
 
-        self.accuracy   = Averager()
+        self.accuracy   = Averager(filename = '{}/{}.{}.{}'.format(directory, name, 'metrics', 'accuracy'))
         self.loss_function = loss_function if loss_function else nn.NLLLoss()
 
         # optional metrics
         self.f1score_function = f1score_function
-        self.precision = Averager()
-        self.recall = Averager()
-        self.f1score   = Averager()
+        self.precision = Averager(filename = '{}/{}.{}.{}'.format(directory, name, 'metrics', 'precision'))
+        self.recall = Averager(filename = '{}/{}.{}.{}'.format(directory, name, 'metrics', 'recall'))
+        self.f1score   = Averager(filename = '{}/{}.{}.{}'.format(directory, name, 'metrics', 'f1score'))
+
+        self.metrics = [self.train_loss, self.test_loss, self.accuracy, self.precision, self.recall, self.f1score]
         
         self.model_snapshots = []
         
@@ -137,11 +149,14 @@ class Trainer(object):
 
                 del _, i, t
                 del output, loss
-                
+            
             log.info('-- {} -- loss: {}'.format(epoch, self.train_loss))            
             if self.do_every_checkpoint(epoch) == FLAGS.STOP_TRAINING:
                 log.info('loss trend suggests to stop training')
                 self.model_snapshots.save()
+                
+            for m in self.metrics:
+                m.write_to_file()
                 
     def do_every_checkpoint(self, epoch, early_stopping=True):
         if epoch % self.checkpoint != 0:
