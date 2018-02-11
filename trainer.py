@@ -76,6 +76,7 @@ class Trainer(object):
                  optimizer=None,
                  loss_function = None,
                  accuracy_function=None,
+                 f1score_function=None,
                  epochs=10000, checkpoint=1,
                  *args, **kwargs):
         
@@ -85,12 +86,21 @@ class Trainer(object):
         self.epochs     = epochs
         self.checkpoint = checkpoint
 
-        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.01, momentum=0.1)
-        self.loss_function = loss_function if loss_function else nn.NLLLoss()
-        self.accuracy_function = accuracy_function if accuracy_function else self._default_accuracy_function
+        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.05, momentum=0.1)
+
+        # necessary metrics
         self.train_loss = Averager()
         self.test_loss  = Averager()
+        self.accuracy_function = accuracy_function if accuracy_function else self._default_accuracy_function
+
         self.accuracy   = Averager()
+        self.loss_function = loss_function if loss_function else nn.NLLLoss()
+
+        # optional metrics
+        self.f1score_function = f1score_function
+        self.precision = Averager()
+        self.recall = Averager()
+        self.f1score   = Averager()
         
         self.model_snapshots = []
         
@@ -148,10 +158,19 @@ class Trainer(object):
             accuracy = self.accuracy_function(output, t)
             self.accuracy.append(accuracy)
 
+            if self.f1score_function:
+                precision, recall, f1score = self.f1score_function(output, t)
+                self.precision.append(precision)
+                self.recall.append(recall)
+                self.f1score.append(f1score)
             del output, loss, accuracy
             del _, i, t
             
         log.info('-- {} -- loss: {}, accuracy: {}'.format(epoch, self.test_loss, self.accuracy))
+        log.info('-- {} -- precision: {}'.format(epoch, self.precision))
+        log.info('-- {} -- recall: {}'.format(epoch, self.recall))
+        log.info('-- {} -- f1score: {}'.format(epoch, self.f1score))
+        
         if early_stopping:
             return self.loss_trend()
 
