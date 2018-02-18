@@ -59,8 +59,10 @@ if Config().flush:
     print('train: {}, test: {}'.format(len(train_datapoints), len(test_datapoints)))
 
     classified_datapoints = defaultdict(list)
+    class_count = [0] * 6  #num of output classes
     for datapoint in train_datapoints:
         classified_datapoints[tuple(datapoint[2:])].append(datapoint)
+        class_count = [x+y for x, y in zip(class_count, datapoint[2:])]
             
     sort_key = lambda p: len(word_tokenize(p.comment_text))
 
@@ -79,7 +81,7 @@ if Config().flush:
     WORD_FREQ = defaultdict(int)
     CHAR_FREQ = defaultdict(int)
 
-    CHAR_VOCAB = ['<<PAD>>', '<<UNK>>'] + list(set([c for dp in tqdm(datapoints) for c in ''.join(dp.comment_text.split())]))
+    CHAR_VOCAB = ['<<PAD>>', '<<UNK>>', '<<EOS>>'] + list(set([c for dp in tqdm(datapoints) for c in ''.join(dp.comment_text.split())]))
     CHAR_INDEX = defaultdict(lambda : CHAR_VOCAB.index('<<UNK>>'))
     CHAR_INDEX.update({c: i for i, c in enumerate(CHAR_VOCAB)})
 
@@ -95,7 +97,7 @@ if Config().flush:
     print(WORD_FREQ_PAIRS[:100], WORD_FREQ_PAIRS[-100:])
     print('Vocab size: {}'.format(len(INPUT_VOCAB)))
     
-    INPUT_VOCAB = ['<<PAD>>', '<<UNK>>'] + INPUT_VOCAB + OUTPUT_VOCAB
+    INPUT_VOCAB = ['<<PAD>>', '<<UNK>>', '<<EOS>>'] + INPUT_VOCAB + OUTPUT_VOCAB
     WORD_INDEX  = defaultdict(lambda : INPUT_VOCAB.index('<<UNK>>'))
     INPUT_VOCAB = INPUT_VOCAB[ :Config().input_vocab_size ]    
     WORD_INDEX.update( {w: i for i, w in enumerate(INPUT_VOCAB)} )
@@ -112,13 +114,13 @@ if Config().flush:
                  INPUT_VOCAB, OUTPUT_VOCAB,
                  OUTPUT_IDS, PAD,
                  dict(WORD_INDEX), WORD_FREQ_PAIRS,
-                 test_datapoints,  train_datapoints, classified_datapoints], open('cache.pkl', 'wb'))
+                 test_datapoints,  train_datapoints, classified_datapoints, class_count], open('cache.pkl', 'wb'))
 else:
     [CHAR_VOCAB, CHAR_INDEX_DICT,
      INPUT_VOCAB, OUTPUT_VOCAB,
      OUTPUT_IDS, PAD,
      WORD_INDEX_DICT, WORD_FREQ_PAIRS,
-     test_datapoints, train_datapoints, classified_datapoints] = pickle.load(open('cache.pkl', 'rb'))
+     test_datapoints, train_datapoints, classified_datapoints, class_count] = pickle.load(open('cache.pkl', 'rb'))
     WORD_INDEX = defaultdict(lambda : INPUT_VOCAB.index('<<UNK>>'))
     WORD_INDEX.update(WORD_INDEX_DICT)
 
@@ -148,6 +150,9 @@ def pad_seq(seqs, maxlen=0, PAD=PAD):
     def pad_seq_(seq):
         return seq[:maxlen] + [PAD]*(maxlen-len(seq))
 
+    if len(seqs) == 0:
+        return seqs
+    
     if type(seqs[0]) == type([]):
         maxlen = maxlen if maxlen else seq_maxlen(seqs)
         seqs = [ pad_seq_(seq) for seq in seqs ]
@@ -157,13 +162,28 @@ def pad_seq(seqs, maxlen=0, PAD=PAD):
 
 def batchop(datapoints, *args, **kwargs):
     indices = [d.id for d in datapoints]
-    seq  = pad_seq([ [WORD_INDEX[w] for w in word_tokenize(d.comment_text)[:Config().seq_len_limit]]
-                     for d in datapoints])
     
-    seq_char  = pad_seq([ [  pad_seq([CHAR_INDEX[c] for c in w], Config.word_len_limit) for w in word_tokenize(d.comment_text)[:Config().seq_len_limit]   ]
-                     for d in datapoints],
-                   PAD = [PAD]*Config.word_len_limit)
+    slimit = Config().seq_len_limit
+    wlimit = Config().word_len_limit
 
+    seq = []
+    for d in datapoints:
+        words = word_tokenize(d.comment_text)[:slimit]
+        seqi = [WORD_INDEX[w] for w in words] + [WORD_INDEX['<<EOS>>']]
+        seq.append(seqi)
+
+    seq = pad_seq(seq)
+
+    seq_char = []
+    for d in datapoints:
+        words = word_tokenize(d.comment_text)[:slimit]
+        seq_chari = [[CHAR_INDEX[c] for c in w] + [CHAR_INDEX['<<EOS>>']]  for w in words]
+        seq_chari = pad_seq(seq_chari, wlimit) 
+        seq_chari = seq_chari + [[WORD_INDEX['<<EOS>>']] * wlimit]
+        seq_char.append(seq_chari)
+
+    seq_char = pad_seq(seq_char, PAD=[PAD] * wlimit)
+    
     target = [(d.toxic, d.severe_toxic, d.obscene, d.threat, d.insult, d.identity_hate)
               for d in datapoints]
 
@@ -173,12 +193,27 @@ def batchop(datapoints, *args, **kwargs):
 
 def test_batchop(datapoints, *args, **kwargs):
     indices = [d.id for d in datapoints]
-    seq  = pad_seq([ [WORD_INDEX[w] for w in word_tokenize(d.comment_text)[:Config().seq_len_limit]]
-                     for d in datapoints])
     
-    seq_char  = pad_seq([ [  pad_seq([CHAR_INDEX[c] for c in w], Config.word_len_limit) for w in word_tokenize(d.comment_text)[:Config().seq_len_limit]   ]
-                     for d in datapoints],
-                   PAD = [PAD]*Config.word_len_limit)
+    slimit = Config().seq_len_limit
+    wlimit = Config().word_len_limit
+
+    seq = []
+    for d in datapoints:
+        words = word_tokenize(d.comment_text)[:slimit]
+        seqi = [WORD_INDEX[w] for w in words] + [WORD_INDEX['<<EOS>>']]
+        seq.append(seqi)
+
+    seq = pad_seq(seq)
+
+    seq_char = []
+    for d in datapoints:
+        words = word_tokenize(d.comment_text)[:slimit]
+        seq_chari = [[CHAR_INDEX[c] for c in w] + [CHAR_INDEX['<<EOS>>']]  for w in words]
+        seq_chari = pad_seq(seq_chari, wlimit) 
+        seq_chari = seq_chari + [[WORD_INDEX['<<EOS>>']] * wlimit]
+        seq_char.append(seq_chari)
+
+    seq_char = pad_seq(seq_char, PAD=[PAD] * wlimit)
 
     seq, seq_char = np.array(seq), np.array(seq_char)
     return indices, (seq, seq_char), ()
@@ -209,15 +244,28 @@ class BiLSTMDecoderModel(nn.Module):
 
             if filters_remaining == 0:
                 break
+
+
+        self.word_conv   = []
+
+        filters_remaining = self.embed_dim                         #this need not be the case and  filters_remaining'ed vector will be concat to word_embedding
+        for filter_size in cycle(Config.word_conv_filter_sizes):
+            output_channels = min(filter_size, filters_remaining)
+            self.word_conv.append(nn.Conv1d(self.embed_dim + self.char_embed_dim, output_channels, filter_size))
+            filters_remaining -= output_channels
+
+            if filters_remaining == 0:
+                break
+
             
             
         self.fencode = nn.LSTMCell(self.embed_dim + self.char_embed_dim, self.hidden_dim)
         self.bencode = nn.LSTMCell(self.embed_dim + self.char_embed_dim, self.hidden_dim)
         
-        self.decode = nn.GRUCell(self.embed_dim, 2*self.hidden_dim)
+        self.decode = nn.GRUCell(self.embed_dim, 2*self.hidden_dim+self.embed_dim) #fencode + bencode + convolve_seq
         
         self.dropout = nn.Dropout(0.2)
-        self.project = nn.Linear(2*self.hidden_dim, Config.project_dim)
+        self.project = nn.Linear(2*self.hidden_dim+self.embed_dim, Config.project_dim)
         self.classify = nn.Linear(Config.project_dim, 2)
 
         self.log = model_logger.getLogger('model')
@@ -231,11 +279,13 @@ class BiLSTMDecoderModel(nn.Module):
     def cpu(self):
         super(BiLSTMDecoderModel, self).cpu()
         for conv in self.char_conv: conv.cpu()
+        for conv in self.word_conv: conv.cpu()
         return self
     
     def cuda(self):
         super(BiLSTMDecoderModel, self).cuda()
         for conv in self.char_conv: conv.cuda()
+        for conv in self.word_conv: conv.cuda()
         return self
     
     def __(self, tensor, name=''):
@@ -273,6 +323,24 @@ class BiLSTMDecoderModel(nn.Module):
             conv_result.append(convs)            
         conv_result = self.__( torch.stack(conv_result), 'full batch')
         return conv_result
+
+
+    def convolve_seq(self, seq_emb):
+        convs = []
+        batch_size, seq_size, embed_size = seq_emb.size()
+        for filter in self.word_conv:
+            if filter.kernel_size[0] < seq_size:
+                res = self.__(  filter(seq_emb.transpose(-2, -1)), filter )
+                res = self.__(  res.mean(-1), '  after reduction')
+                convs.append(res)
+            else:
+                res = Variable(torch.zeros(batch_size, filter.out_channels))
+                if Config().cuda: res = res.cuda()
+                convs.append(res)
+                
+        convs = self.__( torch.cat(convs, -1), 'convolved seq' )
+        return convs
+
     
     def forward(self, seq, seq_char, classes=OUTPUT_IDS):
         seq      = self.__( Variable(torch.LongTensor(seq)), 'seq')
@@ -304,8 +372,9 @@ class BiLSTMDecoderModel(nn.Module):
             foutput = dropout(foutput[0]), dropout(foutput[1])
             boutput = dropout(boutput[0]), dropout(boutput[1])
 
-        output = self.__(  torch.cat([foutput[0], boutput[0]], dim=-1), 'output'  )
-
+        convolved_seq = dropout( F.tanh(self.convolve_seq(seq_emb.transpose(1, 0))) )
+        output = self.__(  torch.cat([foutput[0], boutput[0], convolved_seq], dim=-1), 'output'  )
+        
         outputs = []
         for class_ in classes:
             class_emb = self.__( self.embed_class(class_), 'class_emb' )
@@ -330,7 +399,7 @@ def loss(output, target, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
     batch_size = output.size()[0]
     for i, t in zip(output, target):
 
-        loss += scale * loss_function(i, t.squeeze()).mean()
+        loss += scale * loss_function(i, t.squeeze()).mean() + 1/( (i.max(dim=1)[1] * t ).sum().float() + 0.001)
         log.debug('loss size: {}'.format(loss.size()))
 
     del target
@@ -415,7 +484,7 @@ def test_repr_function(output, feed, batch_index):
     del indices, seq
     return results
 
-def  experiment(eons=1000, epochs=10, checkpoint=5):
+def  experiment(eons=1000, epochs=10, checkpoint=4):
     try:
         try:
             model =  BiLSTMDecoderModel(Config(), len(INPUT_VOCAB), len(CHAR_VOCAB), len(OUTPUT_VOCAB))
@@ -447,7 +516,7 @@ def  experiment(eons=1000, epochs=10, checkpoint=5):
             turns = int(max_size/train_feed[label].size) + 1            
             trainer[label] = Trainer(name=label_desc,
                                      model=model, 
-                                     loss_function=partial(loss, scale=1), accuracy_function=accuracy, f1score_function=f1score_function, 
+                                     loss_function=partial(loss, loss_function=nn.NLLLoss(max(class_count)/torch.Tensor(class_count)), scale=1), accuracy_function=accuracy, f1score_function=f1score_function, 
                                      checkpoint=checkpoint, epochs=epochs,
                                      feeder = Feeder(train_feed[label], test_feed[label]))
 
@@ -479,7 +548,7 @@ def  experiment(eons=1000, epochs=10, checkpoint=5):
             log.info('on {}th eon'.format(e))
 
             
-            if e and not e % 1:
+            if  not e % 1:
                 test_results = ListTable()
                 test_dump = open('results/experiment_attn_over_test_{}.csv'.format(e), 'w')
                 test_dump.write('|'.join(['id', 'toxic', 'severe_toxic', 'obscene', 'threat', 'insult', 'identity_hate']) + '\n')
