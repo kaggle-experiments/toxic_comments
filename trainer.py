@@ -9,6 +9,8 @@ from debug import memory_consumed
 from utilz import ListTable
 from tqdm import tqdm as _tqdm
 
+import torch
+
 from torch import optim, nn
 
 from collections import namedtuple
@@ -63,20 +65,19 @@ class Averager(list):
             with open(self.filename, 'a') as f:
                 f.write(self.__str__() + '\n')
     
-class Snapshot(object):
+class Snapshot(list):
     def __init__(self, filepath='snapshot.pth'):
         self.filepath = filepath
-        self.history = []
     def save(self):
         try:
             log.info('saving the best model to file {}'.format(self.filepath))
-            torch.save(self.best_model().state_dict(), self.filepath)
+            torch.save(self.best_model(), self.filepath)
             log.info('saved.')
-        except e:
+        except:
             log.exception('unable to save snapshot of the best model')
 
-    def best_model():
-        sorted(self.history, key=lambda i: i[0])[0]
+    def best_model(self):
+        sorted(self, key=lambda i: i[0])[0][1]
 
         
 class Trainer(object):
@@ -96,7 +97,7 @@ class Trainer(object):
         self.epochs     = epochs
         self.checkpoint = checkpoint
 
-        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.005, momentum=0.1)
+        self.optimizer     = optimizer     if optimizer     else optim.Adam(self.runner.model.parameters())
 
         # necessary metrics
         self.train_loss = Averager(filename = '{}/{}.{}.{}'.format(directory, name, 'metrics',  'train_loss'))
@@ -114,7 +115,7 @@ class Trainer(object):
 
         self.metrics = [self.train_loss, self.test_loss, self.accuracy, self.precision, self.recall, self.f1score]
         
-        self.model_snapshots = []
+        self.model_snapshots = Snapshot()
         
 
     def __build_model_group(self, runner, model, *args, **kwargs):
@@ -153,11 +154,15 @@ class Trainer(object):
             log.info('-- {} -- loss: {}'.format(epoch, self.train_loss))            
             if self.do_every_checkpoint(epoch) == FLAGS.STOP_TRAINING:
                 log.info('loss trend suggests to stop training')
-                self.model_snapshots.save()
-                
+                return
+            
+            
             for m in self.metrics:
                 m.write_to_file()
                 
+        self.model_snapshots.save()
+        self.runner.model.eval()
+        
     def do_every_checkpoint(self, epoch, early_stopping=True):
         if epoch % self.checkpoint != 0:
             return
@@ -185,7 +190,8 @@ class Trainer(object):
         log.info('-- {} -- precision: {}'.format(epoch, self.precision))
         log.info('-- {} -- recall: {}'.format(epoch, self.recall))
         log.info('-- {} -- f1score: {}'.format(epoch, self.f1score))
-        
+
+        self.model_snapshots.append((self.test_loss.avg, self.runner.model.state_dict()))
         if early_stopping:
             return self.loss_trend()
 
