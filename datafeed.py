@@ -24,7 +24,7 @@ class DataFeed(object):
                 datapoints = sorted(datapoints, key=sort_key)
             self.bind(datapoints)
 
-        log.info('built Datafeed with the following props:')
+        log.info('built Datafeed: {} with the following props:'.format(self.name))
         log.info(' size       : {}'.format(self.size))
         log.info(' batch_size : {}'.format(self.batch_size))
         log.info(' num_batch  : {}'.format(self.num_batch))
@@ -85,6 +85,7 @@ class DataFeed(object):
                 batch_size = self.batch_size
                 
             if self.offset + batch_size > self.size:
+                log.debug('datafeed: {} over run - resetting offset to zero'.format(self.name))
                 self.reset_offset()
             return self.batch(batch_size=batch_size, apply_batchop=apply_batchop)
         except:
@@ -115,7 +116,7 @@ class MultiplexedDataFeed(DataFeed):
 
         self.bind(datafeeds)
         
-        log.info('built Datafeed with the following props:')
+        log.info('built Datafeed: {} with the following props:'.format(self.name))
         log.info(' size       : {}'.format(self.size))
         log.info(' batch_size : {}'.format(self.batch_size))
         log.info(' num_batch  : {}'.format(self.num_batch))
@@ -131,8 +132,8 @@ class MultiplexedDataFeed(DataFeed):
             
         self.reset_offset()
 
-        for datapoints in self.datafeeds:
-            for d in datapoints.data:
+        for datafeed in self.datafeeds:
+            for d in datafeed.data:
                 self._data_dict[d.id] = d
 
 
