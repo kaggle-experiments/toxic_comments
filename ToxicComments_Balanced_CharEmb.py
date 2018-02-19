@@ -261,11 +261,12 @@ class BiLSTMDecoderModel(nn.Module):
             
         self.fencode = nn.LSTMCell(self.embed_dim + self.char_embed_dim, self.hidden_dim)
         self.bencode = nn.LSTMCell(self.embed_dim + self.char_embed_dim, self.hidden_dim)
+
+        self.attend = nn.Parameter(torch.FloatTensor(self.embed_dim, 2*self.hidden_dim)) # class_emb @ self.attend @ seq_repr
+        self.decode = nn.GRUCell(self.embed_dim + 2*self.hidden_dim, 2*self.hidden_dim) # convolved_seq + attended_output ;; fencode + bencode
         
-        self.decode = nn.GRUCell(self.embed_dim, 2*self.hidden_dim+self.embed_dim) #fencode + bencode + convolve_seq
-        
-        self.dropout = nn.Dropout(0.2)
-        self.project = nn.Linear(2*self.hidden_dim+self.embed_dim, Config.project_dim)
+        self.dropout = nn.Dropout(0.01)
+        self.project = nn.Linear(2*self.hidden_dim, Config.project_dim)
         self.classify = nn.Linear(Config.project_dim, 2)
 
         self.log = model_logger.getLogger('model')
@@ -301,7 +302,7 @@ class BiLSTMDecoderModel(nn.Module):
     def init_hidden(self, batch_size):
         ret = torch.zeros(batch_size, self.hidden_dim)
         if Config().cuda: ret = ret.cuda()
-        return Variable(ret)
+        return Variable(ret, requires_grad=self.training)
 
 
     def embed_char(self, seq_char):
@@ -334,7 +335,7 @@ class BiLSTMDecoderModel(nn.Module):
                 res = self.__(  res.mean(-1), '  after reduction')
                 convs.append(res)
             else:
-                res = Variable(torch.zeros(batch_size, filter.out_channels))
+                res = Variable(torch.zeros(batch_size, filter.out_channels), requires_grad=self.training)
                 if Config().cuda: res = res.cuda()
                 convs.append(res)
                 
@@ -345,7 +346,7 @@ class BiLSTMDecoderModel(nn.Module):
     def forward(self, seq, seq_char, classes=OUTPUT_IDS):
         seq      = self.__( Variable(torch.LongTensor(seq)), 'seq')
         seq_char = self.__( Variable(torch.LongTensor(seq_char)), 'seq_char')
-        classes  = self.__(Variable(torch.LongTensor(classes)),  'classes')
+        classes  = self.__( Variable(torch.LongTensor(classes)),  'classes')
 
         dropout  = self.dropout
         
@@ -358,12 +359,14 @@ class BiLSTMDecoderModel(nn.Module):
             classes = classes.cuda()
             
         batch_size, seq_size = seq.size()
+        pad_mask = (seq > 0).float()
         seq_emb = self.__(   dropout( F.tanh(self.embed(seq)) ), 'seq_emb'   )
         seq_char_emb = self.__(   dropout( F.tanh(self.embed_char(seq_char)) ), 'seq_char_emb'   )
 
         seq_emb = self.__(  torch.cat([seq_emb, seq_char_emb], -1), 'seq_emb')
         seq_emb = seq_emb.transpose(1, 0)
-        
+
+        foutputs, boutputs = [], []
         foutput = self.init_hidden(batch_size), self.init_hidden(batch_size)
         boutput = self.init_hidden(batch_size), self.init_hidden(batch_size)
         for i in range(seq_size):
@@ -372,15 +375,35 @@ class BiLSTMDecoderModel(nn.Module):
             foutput = dropout(foutput[0]), dropout(foutput[1])
             boutput = dropout(boutput[0]), dropout(boutput[1])
 
+            foutputs.append(foutput[0])
+            boutputs.append(boutput[0])
+
+        boutputs = list(reversed(boutputs))
+        foutputs, boutputs = torch.stack(foutputs), torch.stack(boutputs)
+        seq_repr = self.__(  torch.cat([foutputs, boutputs], dim=-1), 'seq_repr'  )
+        output   = self.__(  seq_repr[-1], 'output')
+        seq_repr = self.__(  seq_repr.transpose(1,0), 'seq_repr'  )
+
         convolved_seq = dropout( F.tanh(self.convolve_seq(seq_emb.transpose(1, 0))) )
-        output = self.__(  torch.cat([foutput[0], boutput[0], convolved_seq], dim=-1), 'output'  )
         
         outputs = []
         for class_ in classes:
-            class_emb = self.__( self.embed_class(class_), 'class_emb' )
-            class_emb = self.__( F.tanh(class_emb).expand(batch_size, *class_emb.size()), 'class_emb' )
+            class_emb = self.__( self.embed_class(class_), 'class_emb' ).squeeze(0)
+            class_emb = self.__( F.tanh(class_emb).expand(seq_repr.size()[1], *class_emb.size()), 'class_emb' )
 
-            output = self.__(  F.tanh( dropout(self.decode(class_emb, output)) ), 'output'  )
+            self.__( self.attend, 'self.attend')
+            attn = self.__(  torch.mm(F.tanh(class_emb), self.attend),   'attn')
+            attn = self.__(  attn.expand(seq_repr.size()[0], *attn.size()), 'attn')
+
+            attended_outputs = self.__(  torch.bmm(F.tanh(attn), seq_repr.transpose(1,2)), 'attended_outputs')
+            attended_outputs = self.__(  attended_outputs.sum(dim=1), 'attended_outputs')
+            attended_outputs = self.__(  attended_outputs.squeeze(1) * pad_mask, 'attended_outputs')
+            
+            attended_output = self.__(  F.tanh(attended_outputs).unsqueeze(-1) * seq_repr, 'attended_output')
+            attended_output = self.__(  attended_output.sum(dim=1).squeeze(), 'attended_output')
+
+            inp = self.__(  torch.cat([convolved_seq, attended_output], dim=-1), 'inp')
+            output = self.__(  F.tanh( dropout(self.decode(inp, output)) ), 'output'  )
             logits = self.__(  self.classify(self.project(output)), 'logits'  )
             outputs.append(F.log_softmax(logits, dim=-1))
             
@@ -399,7 +422,7 @@ def loss(output, target, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
     batch_size = output.size()[0]
     for i, t in zip(output, target):
 
-        loss += scale * loss_function(i, t.squeeze()).mean() + 1/( (i.max(dim=1)[1] * t ).sum().float() + 0.001)
+        loss += scale * loss_function(i, t.squeeze()).mean() # + 1/( (i.max(dim=1)[1] * t ).sum().float() + 0.001)
         log.debug('loss size: {}'.format(loss.size()))
 
     del target
@@ -407,7 +430,7 @@ def loss(output, target, loss_function=nn.NLLLoss(), scale=1, *args, **kwargs):
 
 def accuracy(output, target, *args, **kwargs):
     accuracy, f1 = 0.0, 0.0
-    accuracy, f1 = Variable(torch.Tensor([accuracy])), Variable(torch.Tensor([f1]))
+    accuracy, f1 = Variable(torch.Tensor([accuracy]), requires_grad=False), Variable(torch.Tensor([f1]), requires_grad=False)
     if Config().cuda:
         accuracy, f1 = accuracy.cuda(), f1.cuda()
     
@@ -429,7 +452,7 @@ def accuracy(output, target, *args, **kwargs):
     
 def f1score_function(output, target, *args, **kwargs):
     p, r, f1 = 0.0, 0.0, 0.0
-    p, r, f1 = Variable(torch.Tensor([p])), Variable(torch.Tensor([r])), Variable(torch.Tensor([f1]))
+    p, r, f1 = Variable(torch.Tensor([p]), requires_grad=False), Variable(torch.Tensor([r]), requires_grad=False), Variable(torch.Tensor([f1]), requires_grad=False)
     if Config().cuda:
         p, r, f1 = p.cuda(), r.cuda(), f1.cuda()
     
@@ -484,7 +507,7 @@ def test_repr_function(output, feed, batch_index):
     del indices, seq
     return results
 
-def  experiment(eons=1000, epochs=10, checkpoint=4):
+def  experiment(eons=1000, epochs=100, checkpoint=10):
     try:
         try:
             model =  BiLSTMDecoderModel(Config(), len(INPUT_VOCAB), len(CHAR_VOCAB), len(OUTPUT_VOCAB))
@@ -548,7 +571,7 @@ def  experiment(eons=1000, epochs=10, checkpoint=4):
             log.info('on {}th eon'.format(e))
 
             
-            if  not e % 1:
+            if e and not e % 1:
                 test_results = ListTable()
                 test_dump = open('results/experiment_attn_over_test_{}.csv'.format(e), 'w')
                 test_dump.write('|'.join(['id', 'toxic', 'severe_toxic', 'obscene', 'threat', 'insult', 'identity_hate']) + '\n')
@@ -569,26 +592,6 @@ def  experiment(eons=1000, epochs=10, checkpoint=4):
                 
             all_class_trainer.train()
             
-
-            """
-            for label, _, _ in reversed(label_trainer_triples):
-                if not sum(label) and e and not e % 10:  #Avoid neutral classes in every epoch
-                    continue
-                
-                label_desc = '-'.join([OUTPUT_VOCAB[l] for l in [i for i, x in enumerate(label) if x == 1]] )
-                log.info('=================================== training for {} datapoints ========================================'.format(label_desc))
-
-                with open('results/experiment_attn.csv', 'a') as dump:
-                    output, results = predictor[label].predict(random.choice(range(predictor_feed[label].num_batch)))
-                    dump.write(repr(results))
-                    del output, results
-                
-                turns = int(max_size/train_feed[label].size/6) + 1
-                log.info('========================  size: {} and turns: {}==========================================='.format(train_feed[label].size, turns))                
-                for turn in range(turns):
-                    log.info('==================================  label: {} and turn: {}/{}====================================='.format(label_desc, turn, turns))                
-                    trainer[label].train()
-            """
     except:
         log.exception('####################')
         torch.save(model.state_dict(), open('attn_model.pth', 'wb'))
