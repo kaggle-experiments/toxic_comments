@@ -19,6 +19,7 @@ class DataFeed(object):
         self._batchop    = batchop
         self.vocab = vocab
         self._batch_cache = {}
+        self._exhausted_count = 0
         if len(datapoints):
             if sort_key:
                 datapoints = sorted(datapoints, key=sort_key)
@@ -85,8 +86,11 @@ class DataFeed(object):
                 batch_size = self.batch_size
                 
             if self.offset + batch_size > self.size:
-                log.debug('datafeed: {} over run - resetting offset to zero'.format(self.name))
+                self._exhausted_count += 1
                 self.reset_offset()
+                
+                log.debug('datafeed: {} over run - resetting offset to zero for {} time'.format(self.name, self._exhausted_count))
+
             return self.batch(batch_size=batch_size, apply_batchop=apply_batchop)
         except:
             log.exception('batch failed')
@@ -113,7 +117,7 @@ class MultiplexedDataFeed(DataFeed):
         self._batchop    = batchop
         self.vocab = vocab
         self._batch_cache = {}
-
+        self._exhausted_count = 0
         self.bind(datafeeds)
         
         log.info('built Datafeed: {} with the following props:'.format(self.name))

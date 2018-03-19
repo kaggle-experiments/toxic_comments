@@ -248,7 +248,7 @@ class BiLSTMDecoderModel(nn.Module):
 
         self.word_conv   = []
 
-        filters_remaining = self.embed_dim                         #this need not be the case and  filters_remaining'ed vector will be concat to word_embedding
+        filters_remaining = self.hidden_dim                         #this need not be the case and  filters_remaining'ed vector will be concat to word_embedding
         for filter_size in cycle(Config.word_conv_filter_sizes):
             output_channels = min(filter_size, filters_remaining)
             self.word_conv.append(nn.Conv1d(self.embed_dim + self.char_embed_dim, output_channels, filter_size))
@@ -263,7 +263,7 @@ class BiLSTMDecoderModel(nn.Module):
         self.bencode = nn.LSTMCell(self.embed_dim + self.char_embed_dim, self.hidden_dim)
 
         self.attend = nn.Parameter(torch.FloatTensor(self.embed_dim, 2*self.hidden_dim)) # class_emb @ self.attend @ seq_repr
-        self.decode = nn.GRUCell(self.embed_dim + 2*self.hidden_dim, 2*self.hidden_dim) # convolved_seq + attended_output ;; fencode + bencode
+        self.decode = nn.GRUCell(3*self.hidden_dim, 2*self.hidden_dim) # convolved_seq + attended_output ;; fencode + bencode
         
         self.dropout = nn.Dropout(0.01)
         self.project = nn.Linear(2*self.hidden_dim, Config.project_dim)

@@ -97,7 +97,7 @@ class Trainer(object):
         self.epochs     = epochs
         self.checkpoint = checkpoint
 
-        self.optimizer     = optimizer     if optimizer     else optim.Adam(self.runner.model.parameters())
+        self.optimizer     = optimizer     if optimizer     else optim.SGD(self.runner.model.parameters(), lr=0.05, momentum=0.1)
 
         # necessary metrics
         self.train_loss = Averager(filename = '{}/{}.{}.{}'.format(directory, name, 'metrics',  'train_loss'))
